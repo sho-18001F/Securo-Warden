@@ -2462,20 +2462,34 @@ class PersistentView(discord.ui.View):
 
     @discord.ui.button(label="✅認証", style=discord.ButtonStyle.green, custom_id="verify_button_persistent")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 防壁：アカウント作成から24時間以内はツール率が高いため弾く
+        # 1. サーバー（Guild）の取得
+        guild = interaction.guild
+        
+        # 2. ロールの取得 (キャッシュで見つからない場合はAPIから直接取得)
+        role = guild.get_role(self.role_id)
+        if not role:
+            try:
+                role = await guild.fetch_role(self.role_id)
+            except discord.NotFound:
+                return await interaction.response.send_message("❌設定されたロールが見つかりません。", ephemeral=True)
+            except Exception:
+                return await interaction.response.send_message("❌ロールの取得中にエラーが発生しました。", ephemeral=True)
+
+        # 3. 【追加】既に認証済み（ロールを所有）かチェック
+        if role in interaction.user.roles:
+            return await interaction.response.send_message("⚠️あなたは既に認証されているようです。", ephemeral=True)
+
+        # 4. 防壁：アカウント作成から24時間以内はツール率が高いため弾く
         if (discord.utils.utcnow() - interaction.user.created_at).days < 1:
             return await interaction.response.send_message("❌セキュリティ保護のため、作成から24時間未満のアカウントは認証できません。", ephemeral=True)
 
-        guild = interaction.guild
-        role = guild.get_role(self.role_id)
-
-        if not role:
-            return await interaction.response.send_message("❌設定されたロールが見つかりません。", ephemeral=True)
+        # 5. Botの権限チェック
         if not guild.me.guild_permissions.manage_roles:
             return await interaction.response.send_message("❌Botの権限「ロール管理」が不足しています。", ephemeral=True)
         if guild.me.top_role <= role:
             return await interaction.response.send_message("❌Botのロール順位が付与ロールより低いため操作できません。", ephemeral=True)
 
+        # 6. 各認証方式の実行
         try:
             if self.auth_type == "ワンクリック認証":
                 await interaction.user.add_roles(role)
@@ -2495,7 +2509,6 @@ class PersistentView(discord.ui.View):
         
         except Exception as e:
             await interaction.response.send_message(f"❌エラーが発生しました。時間を置いてやり直してください。", ephemeral=True)
-
 class ConfirmView(discord.ui.View):
     def __init__(self, title, message, author_id):
         # timeout=None により、長時間放置してもボタンが反応し続けます
@@ -2701,15 +2714,31 @@ async def sync_webhook_icons():
             for guild in bot.guilds:
                 for channel in guild.text_channels:
                     try:
+                        # Webhook一覧の取得（ここでもリクエストが発生するため少し待機を推奨）
                         webhooks = await channel.webhooks()
+                        await asyncio.sleep(0.5) 
+                        
                         for wh in webhooks:
                             if wh.name in target_names:
+                                # アイコンの更新実行
                                 await wh.edit(avatar=icon_bytes)
                                 print(f"[SUCCESS] Updated icon: {wh.name} in {guild.name}")
+                                
+                                # レートリミット回避のための待機（1〜2秒が安全圏）
+                                await asyncio.sleep(2.0)
+                                
                     except discord.Forbidden:
+                        continue
+                    except discord.HTTPException as e:
+                        # レートリミット(429)が発生した場合は長めに待機
+                        if e.status == 429:
+                            retry_after = e.retry_after if hasattr(e, 'retry_after') else 60
+                            print(f"[RATE LIMIT] Waiting for {retry_after}s...")
+                            await asyncio.sleep(retry_after)
                         continue
                     except Exception as e:
                         continue
+                        
         print("Webhook icon sync completed successfully")
     except Exception as e:
         print(f"Webhook sync error: {e}")
@@ -2739,11 +2768,15 @@ async def setup_hook():
             bot.add_view(TermsView())
 
             # DBから認証パネルの設定を読み込んで登録
+            # role_idが確実に整数として取得されるよう、また再起動のたびに最新を読み込む
             cur.execute("SELECT auth_type, role_id FROM auth_settings")
             auth_rows = cur.fetchall()
+            
             for row in auth_rows:
                 a_type, r_id = row
-                bot.add_view(PersistentView(a_type, r_id))
+                # PersistentViewに正しく型を渡して登録
+                # custom_idが内部で固定されているため、これで再起動後もボタンが反応する
+                bot.add_view(PersistentView(auth_type=str(a_type), role_id=int(r_id)))
             
             print(f"Auth views synced: {len(auth_rows)} panels loaded from DB")
             bot.persistent_views_loaded = True
@@ -6964,4 +6997,4 @@ logging.basicConfig(
 
 logger = logging.getLogger("SecuroWarden")
 
-bot.run("YOUR_BOT_TOKEN_HERE")
+bot.run("YOUR_BOT_TOKEN")
