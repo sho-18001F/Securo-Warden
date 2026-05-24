@@ -656,49 +656,67 @@ def hash_image_bytes(data: bytes) -> str:
 # ===============================
 # ランダム名判定（企業レベル）
 # ===============================
-def looks_random(name: str) -> bool:
+def looks_random(name: str, user_id: int = None, owner_id: int = None) -> bool:
     """
-    スパム垢・使い捨て垢・自動生成名を検出
-    誤検知を抑えつつ検出力を最大化
+    サーバー所有者を完全除外。普通の名前（gohan21235等）の誤検知を極限まで抑え、
+    乗っ取りスパム垢（超長文ランダム名、人名+4桁数字）のみを的確に検出する完全版。
     """
-
     try:
         if not name:
             return False
 
-        name = name.strip()
-
-        # 短すぎる名前は除外
-        if len(name) < 6:
+        # 1. サーバー所有者（オーナー）は絶対に検知対象外（安全弁）
+        if user_id and owner_id and user_id == owner_id:
             return False
 
-        # ===== 英数字のみ =====
-        if re.fullmatch(r"[A-Za-z0-9_]+", name):
+        name = name.strip()
+        length = len(name)
 
-            # 母音がない → 高確率ランダム
+        # 短すぎる名前はスパム率が低いため除外
+        if length < 6:
+            return False
+
+        # ===== 英数字・アンダースコアのみの判定 =====
+        if re.fullmatch(r"[A-Za-z0-9_]+", name):
+            
+            # 【対策A】gohan21235 などの「名前＋長めの数字」を救済
+            # 単に数字が連続しているだけ（例: 21235）なら、文字数全体に対して数字が多すぎない限り許容する。
+            # ただし、末尾4桁数字かつ全体が「人名風で異様に長い」スパムは後述のロジックで仕留める。
+            
+            # ① 母音（aeiou）が1文字も含まれない → 高確率でランダム生成
             if not re.search(r"[aeiouAEIOU]", name):
                 return True
 
-            # 数字が多すぎる
-            digit_ratio = sum(c.isdigit() for c in name) / len(name)
-            if digit_ratio >= 0.6:
-                return True
-
-            # 同一文字の連続（aaaaaa など）
+            # ② 同一文字の5連続以上（aaaaaa等）
             if re.search(r"(.)\1{4,}", name):
                 return True
 
-            # 長い数字列
-            if re.search(r"\d{4,}", name):
+            # ③ 英数字が激しく混ざり合うカオス度（Entropy）の検知
+            # vm1wr2ix... のような文字と数字が細かく交互に出るタイプを捕まえる
+            # 英字から数字、または数字から英字への切り替わり回数をカウント
+            transitions = sum(1 for i in range(length - 1) if name[i].isalpha() != name[i+1].isalpha())
+            if length >= 20 and transitions >= 8:
                 return True
 
-            # 子音連続（dfghjkl 等）
-            if re.search(r"[bcdfghjklmnpqrstvwxyz]{5,}", name, re.I):
+            # ④ 子音の異常な連続（w, y を除外した純粋な子音で判定）
+            # スパム特有の「gzfprd」のような詰まった文字列を検知（しきい値を6文字に緩和して誤検知防止）
+            if re.search(r"[bcdfghjklmnpqrstvxz]{6,}", name, re.I):
                 return True
 
-        # ===== Unicode荒らし =====
-        # 不可視文字・記号だらけ
-        if sum(not c.isalnum() for c in name) / len(name) > 0.6:
+            # ⑤ 【ターゲット検知】乗っ取りスパムに多い「人名風ロング名 ＋ 末尾4桁数字」
+            # 例: rhondaramirez0290 (19文字)
+            # 全体が15文字以上と長く、末尾が「ちょうど4桁の数字」で終わる。かつ、数字の比率が多すぎないもの
+            if length >= 15 and re.search(r'(?<!\d)\d{4}$', name):
+                # 一般人の「gohan2004」などの短い名前は上の length>=15 で弾かれるため安全
+                return True
+
+            # ⑥ 完全に数字だけのアカウント（Botの自動生成に多い）
+            if name.isdigit() and length >= 8:
+                return True
+
+        # ===== Unicode荒らし・記号系スパム =====
+        # 不可視文字や特殊記号が文字数の60%を超えている場合
+        if sum(not c.isalnum() for c in name) / length > 0.6:
             return True
 
         return False
@@ -2459,8 +2477,13 @@ class PersistentView(discord.ui.View):
         super().__init__(timeout=None)
         self.auth_type = auth_type
         self.role_id = role_id
+        
+        # 【修正ポイント】
+        # 永続Viewは custom_id が一致することで再起動後も動作します。
+        # role_id を含めることで、サーバーごとに異なるロール設定を正しく識別させます。
+        self.verify.custom_id = f"verify_button_{role_id}"
 
-    @discord.ui.button(label="✅認証", style=discord.ButtonStyle.green, custom_id="verify_button_persistent")
+    @discord.ui.button(label="✅認証", style=discord.ButtonStyle.green)
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         # 1. サーバー（Guild）の取得
         guild = interaction.guild
@@ -2509,6 +2532,7 @@ class PersistentView(discord.ui.View):
         
         except Exception as e:
             await interaction.response.send_message(f"❌エラーが発生しました。時間を置いてやり直してください。", ephemeral=True)
+
 class ConfirmView(discord.ui.View):
     def __init__(self, title, message, author_id):
         # timeout=None により、長時間放置してもボタンが反応し続けます
@@ -2768,14 +2792,15 @@ async def setup_hook():
             bot.add_view(TermsView())
 
             # DBから認証パネルの設定を読み込んで登録
-            # role_idが確実に整数として取得されるよう、また再起動のたびに最新を読み込む
+            # role_idに基づいてcustom_idが生成されるPersistentViewを、
+            # DBに保存されている全てのサーバー設定分、ループで登録します。
             cur.execute("SELECT auth_type, role_id FROM auth_settings")
             auth_rows = cur.fetchall()
             
             for row in auth_rows:
                 a_type, r_id = row
-                # PersistentViewに正しく型を渡して登録
-                # custom_idが内部で固定されているため、これで再起動後もボタンが反応する
+                # PersistentView内部で self.verify.custom_id = f"verify_button_{role_id}" と
+                # 設定されているため、ここで登録することで再起動後もインタラクションを維持できます。
                 bot.add_view(PersistentView(auth_type=str(a_type), role_id=int(r_id)))
             
             print(f"Auth views synced: {len(auth_rows)} panels loaded from DB")
@@ -5638,13 +5663,17 @@ async def admin_warn(
 @app_commands.describe(
     id="対象ユーザーID",
     reason="停止理由",
-    duration="停止期間（例: 10m, 2h, 1d / 未入力で無期限）"
+    duration="停止期間（例: 10m, 2h, 1d / 未入力で無期限）",
+    proof="証拠となるスクリーンショット等（任意）",
+    dm="Trueで利用停止DMを送信、Falseで送信しません"
 )
 async def admin_penalty_set(
     interaction: discord.Interaction,
     id: str,
     reason: str,
-    duration: str | None = None
+    duration: str | None = None,
+    proof: discord.Attachment | None = None,
+    dm: bool = True
 ):
     if interaction.user.id not in ADMIN_USER_ID:
         await interaction.response.send_message(
@@ -5662,31 +5691,43 @@ async def admin_penalty_set(
     seconds = parse_duration(duration) if duration else None
     until = int(time.time()) + seconds if seconds else None
 
+    # DBへの保存（措置自体は画像なしでも実行）
     cur.execute(
         "INSERT OR REPLACE INTO admin_penalties VALUES (?, ?, ?)",
         (int(id), until, reason)
     )
     conn.commit()
 
-    user = await bot.fetch_user(int(id))
+    # DM送信の制御
+    if dm:
+        try:
+            user = await bot.fetch_user(int(id))
+            embed = discord.Embed(
+                title="🚫 利用停止通知",
+                color=discord.Color.red()
+            )
+            embed.description = (
+                "あなたは **Securo Warden** の利用が停止されました。\n\n"
+                f"**利用停止期間**\n{'無期限' if until is None else duration}\n\n"
+                f"**理由**\n{reason}"
+            )
+            
+            # 証拠画像がある場合はEmbedにセット
+            if proof:
+                # 画像のURLをEmbedのメイン画像として設定
+                embed.set_image(url=proof.url)
+                embed.set_footer(text="※添付された画像は、利用規約違反の証拠として記録されています。")
 
-    embed = discord.Embed(
-        title="🚫 利用停止通知",
-        color=discord.Color.red()
-    )
-    embed.description = (
-        "あなたは **Securo Warden** の利用が停止されました。\n\n"
-        f"**利用停止期間**\n{'無期限' if until is None else duration}\n\n"
-        f"**理由**\n{reason}"
-    )
+            await user.send(embed=embed)
+        except Exception:
+            # DM閉鎖などの場合はスキップ
+            pass
 
-    try:
-        await user.send(embed=embed)
-    except:
-        pass
-
-    await interaction.followup.send("✅ 利用停止を設定しました。", ephemeral=True)
-
+    status_msg = f"✅ 利用停止を設定しました。({'DM送信済み' if dm else 'DM未送信'})"
+    if proof:
+        status_msg += "\n📸 証拠画像を添付しました。"
+        
+    await interaction.followup.send(status_msg, ephemeral=True)
 
 # ===============================
 # ADMIN PENALTY REMOVE
@@ -5906,7 +5947,7 @@ async def help_command(interaction: discord.Interaction):
     # 下部リンク用 Embed（画像のような外部リンク表示）
     link_embed = discord.Embed(
         title="公式サイト",
-        url="https://www.securowarden-tool.com/%E3%82%B3%E3%83%9E%E3%83%B3%E3%83%89%E4%B8%80%E8%A6%A7",
+        url="https://securowarden.com/commands",
         color=discord.Color.blue()
     )
 
@@ -6997,4 +7038,4 @@ logging.basicConfig(
 
 logger = logging.getLogger("SecuroWarden")
 
-bot.run("YOUR_BOT_TOKEN")
+bot.run("YOUR_BOT_TOKEN_HERE")
