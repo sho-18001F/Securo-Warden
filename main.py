@@ -2821,46 +2821,77 @@ async def on_message_delete(message: discord.Message):
 
     deleter = None
 
+    # メッセージの送信者が取得できるか確認（キャッシュ切れ対策）
+    author_available = message.author is not None
+
     # ======================
     # 🔎 監査ログから削除者取得
     # ======================
-    try:
-        async for entry in message.guild.audit_logs(
-            limit=5,
-            action=discord.AuditLogAction.message_delete
-        ):
-            if entry.target and entry.target.id == message.author.id:
+    if message.guild.me.guild_permissions.view_audit_log:
+        try:
+            async for entry in message.guild.audit_logs(
+                limit=5,
+                action=discord.AuditLogAction.message_delete
+            ):
+                # 送信者情報が確定している場合は、そのターゲットIDと照合
+                if author_available and entry.target and entry.target.id == message.author.id:
+                    # 時間が近いログのみ採用（Discord APIの遅延を考慮し5秒以内）
+                    if (discord.utils.utcnow() - entry.created_at).total_seconds() < 5:
+                        # Botによる削除は無視
+                        if entry.user.bot:
+                            return
 
-                # 時間が近いログのみ採用
-                if (discord.utils.utcnow() - entry.created_at).total_seconds() < 5:
-
-                    # Botによる削除は無視
-                    if entry.user.bot:
-                        return
-
-                    deleter = entry.user
-                    break
-    except:
-        pass
+                        deleter = entry.user
+                        break
+                
+                # 【追加】キャッシュ切れで送信者が不明な場合、直近5秒以内の削除ログがあればそれを採用
+                elif not author_available:
+                    if (discord.utils.utcnow() - entry.created_at).total_seconds() < 5:
+                        if entry.user.bot:
+                            return
+                        deleter = entry.user
+                        break
+        except Exception as e:
+            print(f"[LOG ERROR][on_message_delete] Audit log fetch failed: {repr(e)}")
 
     # ======================
     # 🔹 自己削除（監査ログに残らない）
     # ======================
     if deleter is None:
-
-        # Bot自身のメッセージ削除は記録しない
-        if message.author.bot:
-            return
-
-        deleter = message.author
+        if author_available:
+            # Bot自身のメッセージ削除は記録しない
+            if message.author.bot:
+                return
+            deleter = message.author
+        else:
+            # 送信者も削除者も特定できない場合のフォールバックテキスト用
+            deleter = None
 
     # ======================
     # 🧾 表示用テキスト
     # ======================
-    sender_text = f"{message.author} ({message.author.id})"
-    deleter_text = f"{deleter} ({deleter.id})"
+    if author_available:
+        sender_text = f"{message.author} ({message.author.id})"
+    else:
+        sender_text = "不明なユーザー (古いメッセージ)"
 
-    content = message.content if message.content else "（なし）"
+    if deleter:
+        deleter_text = f"{deleter} ({deleter.id})"
+    else:
+        # 監査ログになく、自己削除とも断定できない場合
+        if not author_available:
+            deleter_text = "本人 または 権限持ちのユーザー"
+        else:
+            deleter_text = f"{message.author} ({message.author.id}) [自己削除]"
+
+    # メッセージ内容の安全な取得
+    content = message.content if (hasattr(message, 'content') and message.content) else "（なし、または取得不可）"
+
+    # 送信時刻の安全な取得
+    if message.created_at:
+        time_text = message.created_at.strftime("%Y/%m/%d %H:%M")
+    else:
+        time_text = "不明"
 
     # ======================
     # 📤 ログ送信
@@ -2870,16 +2901,16 @@ async def on_message_delete(message: discord.Message):
             message.guild,
             "🗑️ メッセージ削除",
             [
-                ("チャンネル", message.channel.mention, True),
+                ("チャンネル", message.channel.mention if message.channel else f"#{message.channel_id}", True),
                 ("送信者", sender_text, False),
                 ("削除者", deleter_text, False),
                 ("内容", content, False),
-                ("送信時刻", message.created_at.strftime("%Y/%m/%d %H:%M"), True)
+                ("送信時刻", time_text, True)
             ],
             discord.Color.dark_gray()
         )
-    except:
-        pass
+    except Exception as e:
+        print(f"[LOG ERROR][on_message_delete] Failed to send log: {repr(e)}")
 
 
 # ===============================
@@ -3340,9 +3371,9 @@ async def on_member_join(member: discord.Member):
         row = cur.fetchone()
         
         if row and row[0] == 1:
-            # 15秒以内の参加者をキャッシュして追跡
-            join_cache[guild.id] = [t for t in join_cache[guild.id] if now - t < 15]
-            join_cache[guild.id].append(now)
+            # 15秒以内の参加者をキャッシュして追跡 (タイムスタンプとメンバーオブジェクトを保存)
+            join_cache[guild.id] = [item for item in join_cache[guild.id] if now - item[0] < 15]
+            join_cache[guild.id].append((now, member))
 
             join_count = len(join_cache[guild.id])
 
@@ -3361,8 +3392,10 @@ async def on_member_join(member: discord.Member):
 
             # 15秒間に5人以上参加した場合：防衛プロトコル発動
             if join_count >= 5:
-                # 招待停止、全チャンネルロック、対象者BANを実行
-                await execute_raid_protection(guild, [member])
+                # 【修正】キャッシュに溜まっている直近15秒以内のメンバー全員をリスト化して渡す
+                target_members = [item[1] for item in join_cache[guild.id]]
+                await execute_raid_protection(guild, target_members)
+                join_cache[guild.id].clear()
         
         # 人間の通常参加ならここで終了
         return
@@ -3404,9 +3437,9 @@ async def on_member_join(member: discord.Member):
     if not row_nuke or row_nuke[0] != 1:
         return
 
-    # --- NoWarning Bot 判定 ---
+    # --- 危険な未認証Bot 判定（エラー修正） ---
     try:
-        if not member.public_flags.no_warning:
+        if member.public_flags.verified_bot:
             return
     except AttributeError:
         return
@@ -3427,25 +3460,25 @@ async def on_member_join(member: discord.Member):
         if is_whitelisted_member(inviter):
             return
 
-    # --- Webhook 全削除 ---
-    for channel in guild.text_channels:
+    # --- Webhook 全削除（API高負荷バグ修正：1回で全取得して処理） ---
+    if guild.me.guild_permissions.manage_webhooks:
         try:
-            webhooks = await channel.webhooks()
-            for webhook in webhooks:
-                await webhook.delete(reason="AntiNuke: NoWarning Bot detected")
+            all_webhooks = await guild.webhooks()
+            for webhook in all_webhooks:
+                await webhook.delete(reason="AntiNuke: 未認証Bot検知に伴う一括削除")
         except:
             pass
 
     # --- Bot Kick ---
     try:
-        await guild.kick(member, reason="AntiNuke: NoWarning Bot detected")
+        await guild.kick(member, reason="AntiNuke: 未認証Bot検知")
     except:
         pass
 
     # --- 招待者 BAN ---
     if inviter:
         try:
-            await guild.ban(inviter, reason="AntiNuke: NoWarning Bot を招待")
+            await guild.ban(inviter, reason="AntiNuke: 未認証Botを招待")
         except:
             pass
 
@@ -3488,7 +3521,7 @@ async def on_member_join(member: discord.Member):
     await send_security_log(
         guild,
         "🧨 AntiNuke 発動",
-        "危険なBot（NoWarning）の侵入を検知し、全防衛システムを起動しました。",
+        "危険なBotの侵入を検知しました",
         [
             ("侵入Bot", f"{member} ({member.id})", False),
             ("招待者", f"{inviter} ({inviter.id})" if inviter else "不明", False),
@@ -6997,8 +7030,229 @@ async def security_status(interaction: discord.Interaction):
         # defer後のためfollowupを使用
         await interaction.followup.send("❌ステータスの取得中にエラーが発生しました。", ephemeral=True)
 
+lock_group = app_commands.Group(name="lock", description="指定チャンネルのロックコマンド")
+
+# --- /lock add コマンド ---
+@lock_group.command(name="add", description="指定したチャンネルをロックダウンします")
+@app_commands.describe(channel="ロックするチャンネル選択")
+async def lock_add(interaction: discord.Interaction, channel: discord.TextChannel):
+    # 🌟 [条件チェック1] 実行したユーザーの権限確認
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "❌このコマンドを実行するには**チャンネルを管理**権限が必要です。",
+            ephemeral=True
+        )
+        return
+
+    # 🌟 [条件チェック2] Bot自身の権限確認
+    bot_member = interaction.guild.me
+    if not bot_member.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "❌権限不足です。Botのロール権限に**チャンネルの管理**を付与してください",
+            ephemeral=True
+        )
+        return
+
+    # everyoneのロールオブジェクトと現在の権限（Overwrite）を取得
+    everyone_role = interaction.guild.default_role
+    current_overwrites = channel.overwrites_for(everyone_role)
+
+    # 🌟 [条件チェック3] すでに指定の2つの権限が拒否（False）になっているか確認
+    if current_overwrites.send_messages is False and current_overwrites.send_messages_in_threads is False:
+        await interaction.response.send_message(
+            "❌指定したチャンネルはすでにロックされています。",
+            ephemeral=True
+        )
+        return
+
+    # 🚀 権限の上書き設定（送信とスレッド送信を「拒否」に設定）
+    current_overwrites.send_messages = False
+    current_overwrites.send_messages_in_threads = False
+
+    try:
+        # チャンネルの権限を更新
+        await channel.set_permissions(everyone_role, overwrite=current_overwrites)
+        # 🌟 正常終了の応答（指定チャンネルをメンション表示）
+        await interaction.response.send_message(
+            f"✅{channel.mention}をロックダウンしました。",
+            ephemeral=True
+        )
+    except Exception:
+        # 万が一のDiscord APIエラー時のセーフティ
+        await interaction.response.send_message(
+            "❌チャンネルの権限更新中にエラーが発生しました。",
+            ephemeral=True
+        )
+
+
+# --- /lock remove コマンド ---
+@lock_group.command(name="remove", description="指定したチャンネルのロックダウンを解除します")
+@app_commands.describe(channel="アンロックするチャンネル選択")
+async def lock_remove(interaction: discord.Interaction, channel: discord.TextChannel):
+    # 🌟 [条件チェック1] 実行したユーザーの権限確認
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "❌このコマンドを実行するには**チャンネルを管理**権限が必要です。",
+            ephemeral=True
+        )
+        return
+
+    # 🌟 [条件チェック2] Bot自身の権限確認
+    bot_member = interaction.guild.me
+    if not bot_member.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "❌権限不足です。Botのロール権限に**チャンネルの管理**を付与してください",
+            ephemeral=True
+        )
+        return
+
+    everyone_role = interaction.guild.default_role
+    current_overwrites = channel.overwrites_for(everyone_role)
+
+    # 🌟 [条件チェック3] すでにロックが解除されている（拒否になっていない、つまり None または True）か確認
+    if current_overwrites.send_messages is not False and current_overwrites.send_messages_in_threads is not False:
+        await interaction.response.send_message(
+            "❌指定したチャンネルはロックされていません。",
+            ephemeral=True
+        )
+        return
+
+    # 🚀 権限の解除設定（「拒否」を解除してデフォルトの「未設定(None)」に戻す）
+    current_overwrites.send_messages = None
+    current_overwrites.send_messages_in_threads = None
+
+    try:
+        await channel.set_permissions(everyone_role, overwrite=current_overwrites)
+        await interaction.response.send_message(
+            f"✅{channel.mention}のロックダウンを解除しました。",
+            ephemeral=True
+        )
+    except Exception:
+        await interaction.response.send_message(
+            "❌チャンネルの権限更新中にエラーが発生しました。",
+            ephemeral=True
+        )
+
+bot.tree.add_command(lock_group)
+
+import asyncio
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+# ※ botオブジェクトは既存のコードのものを使用してください
+# bot = commands.Bot(...)
+
+@bot.tree.command(
+    name="disable_externalapps",
+    description="指定したタイプの外部アプリ使用権限を一斉にOFFにします。"
+)
+@app_commands.choices(type=[
+    app_commands.Choice(name="チャンネル", value="チャンネル"),
+    app_commands.Choice(name="カテゴリ", value="カテゴリ"),
+    app_commands.Choice(name="ロール", value="ロール")
+])
+async def disable_externalapps(
+    interaction: discord.Interaction, 
+    type: app_commands.Choice[str]
+):
+    # 1. 実行ユーザーのサーバー管理権限チェック
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌このコマンドを実行するには**サーバー管理**権限が必要です。",
+            ephemeral=True
+        )
+        return
+
+    # 2. 処理が長引く可能性があるため、事前にdefer(応答待機)を設定 (ephemeral=Trueを維持)
+    await interaction.response.defer(ephemeral=True)
+
+    guild = interaction.guild
+    targets = []
+    type_value = type.value  # 選択された値を取得
+
+    try:
+        # 3. タイプに応じた対象オブジェクトのリストアップと上限チェック
+        if type_value == "チャンネル":
+            # カテゴリ以外のチャンネル（テキスト、ボイス、ステージ、フォーラム等）を収集
+            targets = [ch for ch in guild.channels if not isinstance(ch, discord.CategoryChannel)]
+            if len(targets) > 30:
+                targets = targets[:30]
+                
+        elif type_value == "カテゴリ":
+            targets = guild.categories
+            if len(targets) > 30:
+                targets = targets[:30]
+                
+        elif type_value == "ロール":
+            # @everyone を含むすべてのロール（Bot自身の最高ロールより下、かつ編集可能なもの）
+            targets = [role for role in guild.roles if role < guild.me.top_role and not role.is_bot_managed()]
+            if len(targets) > 20:
+                targets = targets[:20]
+
+        # 4. 既にすべてOFFになっているかの事前チェック
+        already_off = True
+        for target in targets:
+            if type_value in ["チャンネル", "カテゴリ"]:
+                # @everyoneに対するチャンネル/カテゴリのオーバーライド確認
+                overwrite = target.overwrites_for(guild.default_role)
+                if overwrite.use_external_apps is not False:
+                    already_off = False
+                    break
+            elif type_value == "ロール":
+                # ロール自体の権限確認
+                if target.permissions.use_external_apps:
+                    already_off = False
+                    break
+
+        if not targets or already_off:
+            await interaction.followup.send(
+                "✅すでに外部アプリ権限権限がOFFになっています。",
+                ephemeral=True
+            )
+            return
+
+        # 5. 一斉変更処理の実行 (0.8秒ウェイト)
+        changed_count = 0
+        for target in targets:
+            if type_value in ["チャンネル", "カテゴリ"]:
+                overwrite = target.overwrites_for(guild.default_role)
+                # 既にOFFならスキップして無駄なAPI消費を抑える
+                if overwrite.use_external_apps is False:
+                    continue
+                
+                overwrite.use_external_apps = False
+                await target.set_permissions(guild.default_role, overwrite=overwrite)
+                changed_count += 1
+                
+            elif type_value == "ロール":
+                if not target.permissions.use_external_apps:
+                    continue
+                
+                permissions = target.permissions
+                permissions.update(use_external_apps=False)
+                await target.edit(permissions=permissions)
+                changed_count += 1
+
+            # 1権限変更ごとに0.8秒待機
+            await asyncio.sleep(0.8)
+
+        # 6. 正常終了メッセージ
+        await interaction.followup.send(
+            f"✅{changed_count}個の{type_value}で外部アプリ使用権限をOFFにしました。",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        # 7. 例外エラーハンドリング
+        error_name = type(e).__name__
+        await interaction.followup.send(
+            f"❌エラーが発生しました。{error_name}",
+            ephemeral=True
+        )
+
 # ===============================
-# メッセージ右クリック通報
+# テキストコマンドでないコマンド類
 # ===============================
 @bot.tree.context_menu(name="Report Message")
 async def report_message(
