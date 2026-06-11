@@ -1,3 +1,5 @@
+Copyright (c) 2026 securo.official All rights reserved.
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
