@@ -5993,7 +5993,8 @@ async def help_command(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="admin_serverlist",
-    description="【BOT管理者専用】Botが導入されているサーバー一覧をファイルで出力"
+    description="【BOT管理者専用】Botが導入されているサーバー一覧をファイルで出力",
+    guild=discord.Object(id=MODERATION_SERVER_ID)
 )
 async def serverlist(interaction: discord.Interaction):
     # 🔒 管理者チェック（ADMIN_USER_ID セットを使用）
@@ -6517,7 +6518,11 @@ async def verify_setup(
         await interaction.followup.send(f"❌不明なエラー{error_name}が発生しました。", ephemeral=True)
         traceback.print_exc()
 
-@bot.tree.command(name="admin_update_terms", description="（Bot運営者専用）利用規約を更新します")
+@bot.tree.command(
+    name="admin_update_terms", 
+    description="（Bot運営者専用）利用規約を更新します",
+    guild=discord.Object(id=MODERATION_SERVER_ID)
+)
 async def admin_update_terms(interaction: discord.Interaction):
     if interaction.user.id not in ADMIN_USER_ID:
         await interaction.response.send_message(
@@ -6558,7 +6563,11 @@ async def admin_update_terms(interaction: discord.Interaction):
 # ===============================
 # ADMIN SERVER LEAVE
 # ===============================
-@bot.tree.command(name="admin_server_leave", description="（Bot運営者専用）サーバーをブラックリスト登録し退出")
+@bot.tree.command(
+    name="admin_server_leave", 
+    description="（Bot運営者専用）サーバーをブラックリスト登録し退出",
+    guild=discord.Object(id=MODERATION_SERVER_ID)
+)
 async def leave(interaction: discord.Interaction, id: str, duration: typing.Optional[str] = None):
     if interaction.user.id not in ADMIN_USER_ID:
         await interaction.response.send_message(
@@ -6599,7 +6608,6 @@ async def leave(interaction: discord.Interaction, id: str, duration: typing.Opti
     except Exception as e:
         print(f"[ERROR][admin_server_leave] {repr(e)}")
         await interaction.followup.send(f"🔥予期せぬエラーが発生しました。", ephemeral=True)
-
 
 # ===============================
 # FOLLOW ANNOUNCEMENTS
@@ -6707,7 +6715,8 @@ async def announce(
 # ===============================
 @bot.tree.command(
     name="admin_global_announcement", 
-    description="（Bot運営者専用）全サーバーの所有者のDMにメッセージを送信します"
+    description="（Bot運営者専用）全サーバーの所有者のDMにメッセージを送信します",
+    guild=discord.Object(id=MODERATION_SERVER_ID)
 )
 @app_commands.describe(title="埋め込みタイトル", message="送信メッセージ入力")
 async def admin_global_announcement(interaction: discord.Interaction, title: str, message: str):
@@ -7137,13 +7146,6 @@ async def lock_remove(interaction: discord.Interaction, channel: discord.TextCha
 
 bot.tree.add_command(lock_group)
 
-import asyncio
-import discord
-from discord import app_commands
-from discord.ext import commands
-
-# ※ botオブジェクトは既存のコードのものを使用してください
-# bot = commands.Bot(...)
 
 @bot.tree.command(
     name="disable_externalapps",
@@ -7294,4 +7296,4 @@ logging.basicConfig(
 
 logger = logging.getLogger("SecuroWarden")
 
-bot.run("YOUR_BOT_TOKEN_HERE")
+bot.run("BOT_TOKEN_HERE")
