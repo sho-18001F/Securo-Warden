@@ -40,7 +40,7 @@ CURRENT_TERMS_VERSION = 1
 # 不正アクセス（ツール）検知時の優しいメッセージ
 ERROR_BOT_DETECTED = "⚠️ 通信環境の影響で認証に失敗しました。お手数ですが、もう一度画面上の操作をやり直してください。"
 # タイポスクワッティング判定用の正解リスト
-OFFICIAL_DOMAINS = ["discord.com", "discord.gg", "google.com", "google.co.jp", "youtube.com", "crowdworks.jp"]
+OFFICIAL_DOMAINS = ["discord.com", "discord.gg", "google.com", "google.co.jp", "youtube.com", "crowdworks.jp,"gt86-love.github.io"]
 # 明示的なブラックリスト
 HARD_BLACKLIST = ["rt-bot.com", "doogle.gg", "doublecounter.gg"]
 SUPPORT_GUILD_ID = 1460072359305154700
